@@ -84,7 +84,7 @@ namespace GoogleCloudLogging.Extensions.AspNetCore
 		{
 			var jsonCredentials = Newtonsoft.Json.JsonConvert.SerializeObject(googleCloudServiceAccountInfo);
 
-			var credentialsFilePath = $"{Path.GetTempPath()}/google-application-credentials.json";
+			var credentialsFilePath = Path.Combine(Path.GetTempPath(), "google-application-credentials.json");
 			using (var streamWriter = File.CreateText(credentialsFilePath))
 			{
 				streamWriter.Write(jsonCredentials);
