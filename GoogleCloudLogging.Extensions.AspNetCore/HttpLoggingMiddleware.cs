@@ -49,76 +49,79 @@ namespace GoogleCloudLogging.Extensions.AspNetCore
 
 		public async Task Invoke(HttpContext context)
 		{
-			var request = await GetRequest(context);
-			
 			var stopwatch = new Stopwatch();
 			stopwatch.Start();
-			var response = await ExecuteRequest(context, this.next);
+			var requestAndResponse = await ExecuteAndReadRequestAsync(context, this.next);
 			stopwatch.Stop();
 			var latency = stopwatch.Elapsed;
 			
 			var logName = new LogName(this.googleCloudAccount.ProjectId, LOG_ID);
-			Value requestStruct = Helpers.ProtobufHelper.ConvertToStructValue(request);
-			Value responseStruct = Helpers.ProtobufHelper.ConvertToStructValue(response);
+			Value requestStruct = Helpers.ProtobufHelper.ConvertToStructValue(requestAndResponse.Request);
+			Value responseStruct = Helpers.ProtobufHelper.ConvertToStructValue(requestAndResponse.Response);
 			var resource = new MonitoredResource { Type = "global" };
 			var googleCloudRequest = ConvertToGoogleCloudHttpRequest(context, latency);
 			var logEntry = CreateRequestResponseLogEntry(logName, requestStruct, responseStruct, googleCloudRequest, context.Response.StatusCode < 400 ? LogSeverity.Info : LogSeverity.Error);
 			await this.loggingClient.WriteLogEntriesAsync(logName, resource, null, new[] { logEntry });
 		}
 
-		private static async Task<dynamic> ExecuteRequest(HttpContext context, RequestDelegate next)
+		private static async Task<dynamic> ExecuteAndReadRequestAsync(HttpContext context, RequestDelegate next_)
 		{
-			var originalBody = context.Response.Body;
+			context.Request.EnableBuffering();
+			var originalRequestBody = context.Request.Body;
+			var originalResponseBody = context.Response.Body;
 			
 			try
 			{
+				await using (var requestBodyStream = new MemoryStream())
 				await using (var responseBodyStream = new MemoryStream())
 				{
+					// Read request
+					await context.Request.Body.CopyToAsync(requestBodyStream);
+					requestBodyStream.Seek(0, SeekOrigin.Begin);
+					var requestBody = await new StreamReader(requestBodyStream).ReadToEndAsync();
+					requestBodyStream.Seek(0, SeekOrigin.Begin);
+					context.Request.Body = requestBodyStream;
+					
+					// Swap response stream
 					context.Response.Body = responseBodyStream;
 
-					await next(context);
-
+					// Execute request
+					await next_(context);
+					
+					// Read response
 					responseBodyStream.Seek(0, SeekOrigin.Begin);
 					string responseBody = await new StreamReader(responseBodyStream).ReadToEndAsync();
 					responseBodyStream.Seek(0, SeekOrigin.Begin);
-
-					await responseBodyStream.CopyToAsync(originalBody);
+					await responseBodyStream.CopyToAsync(originalResponseBody);
 					
-					var response = new
+					return new
 					{
-						context.Response.StatusCode,
-						Body = new JsonObject(responseBody),
-						Headers = context.Request.Headers != null ? context.Request.Headers.Select(x => $"{x.Key}: {x.Value}").ToArray() : new string[0],
+						Request = new
+						{
+							Host = context.Request.Host.Value,
+							Path = context.Request.Path.Value,
+							context.Request.Method,
+							context.Request.Protocol,
+							context.Request.Scheme,
+							QueryString = context.Request.QueryString.Value,
+							Body = new JsonObject(requestBody),
+							Headers = context.Request.Headers != null ? context.Request.Headers.Select(x => $"{x.Key}: {x.Value}").ToArray() : new string[0],
+							Cookies = context.Request.Cookies != null ? context.Request.Cookies.Select(x => $"{x.Key}: {x.Value}").ToArray() : new string[0],
+						},
+						Response = new
+						{
+							context.Response.StatusCode,
+							Body = new JsonObject(responseBody),
+							Headers = context.Request.Headers != null ? context.Request.Headers.Select(x => $"{x.Key}: {x.Value}").ToArray() : new string[0],
+						}
 					};
-					
-					return response;
 				}
 			}
 			finally
 			{
-				context.Response.Body = originalBody;
+				context.Request.Body = originalRequestBody;
+				context.Response.Body = originalResponseBody;
 			}
-		}
-
-		private static async Task<dynamic> GetRequest(HttpContext context)
-		{
-			context.Request.EnableBuffering();
-			string body = await new StreamReader(context.Request.Body).ReadToEndAsync();
-			
-			var request = new
-			{
-				Host = context.Request.Host.Value,
-				Path = context.Request.Path.Value,
-				context.Request.Method,
-				context.Request.Protocol,
-				context.Request.Scheme,
-				QueryString = context.Request.QueryString.Value,
-				Body = new JsonObject(body),
-				Headers = context.Request.Headers != null ? context.Request.Headers.Select(x => $"{x.Key}: {x.Value}").ToArray() : new string[0],
-				Cookies = context.Request.Cookies != null ? context.Request.Cookies.Select(x => $"{x.Key}: {x.Value}").ToArray() : new string[0],
-			};
-
-			return request;
 		}
 
 		private static LogEntry CreateRequestResponseLogEntry(
